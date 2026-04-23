@@ -20,14 +20,22 @@ class LeanLibrary:
         if self.p_conn is None:
             if not os.path.exists(self.premises_db):
                 raise FileNotFoundError(f"Premises database not found at {self.premises_db}")
-            self.p_conn = sqlite3.connect(self.premises_db)
+            # Support read-only mode for Kaggle /kaggle/input
+            if "/kaggle/input" in self.premises_db:
+                self.p_conn = sqlite3.connect(f"file:{self.premises_db}?mode=ro", uri=True)
+            else:
+                self.p_conn = sqlite3.connect(self.premises_db)
         return self.p_conn
 
     def _get_s_conn(self):
         if self.s_conn is None:
             if not os.path.exists(self.states_db):
                 raise FileNotFoundError(f"States database not found at {self.states_db}")
-            self.s_conn = sqlite3.connect(self.states_db)
+            # Support read-only mode for Kaggle /kaggle/input
+            if "/kaggle/input" in self.states_db:
+                self.s_conn = sqlite3.connect(f"file:{self.states_db}?mode=ro", uri=True)
+            else:
+                self.s_conn = sqlite3.connect(self.states_db)
         return self.s_conn
         
     def get_premise_json(self, premise_id: str) -> Optional[Dict]:
