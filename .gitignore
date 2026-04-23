@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Databases
+*.db
+*.db-journal
+
+# Models and Tensors
+*.pt
+symbol_embeddings.pt
+checkpoints/
+models/flag_model/
+
+# Vocab and logs
+symbol_vocab.json
+*.log
+
+# Scratch and temp files
+scratch/
+temp/
+my_prompt.txt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
