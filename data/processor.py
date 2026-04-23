@@ -79,16 +79,17 @@ class ExprGraphProcessor:
                 node = json_nodes[curr]
                 for child_key in ['fn', 'arg', 'type', 'body', 'value', 'expr']:
                     if child_key in node:
-                        c_real = real_indices[node[child_key]]
-                        if c_real not in visited:
-                            visited.add(c_real)
-                            final_kept_nodes.add(c_real)
-                            queue.append(c_real)
+                        child_old = node[child_key]
+                        if isinstance(child_old, int):
+                            c_real = real_indices[child_old]
+                            if c_real not in visited:
+                                visited.add(c_real)
+                                final_kept_nodes.add(c_real)
+                                queue.append(c_real)
         else:
             final_kept_nodes = set(valid_indices)
 
         # 3. Re-indexing
-        # final_kept_nodes should be sorted to preserve some order (e.g., topological)
         sorted_kept = sorted(list(final_kept_nodes))
         old_to_new = {old: new for new, old in enumerate(sorted_kept)}
 
