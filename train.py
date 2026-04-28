@@ -1,5 +1,5 @@
-import os
 import argparse
+import shutil
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -93,8 +93,20 @@ def main():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--temp", type=float, default=0.07)
     parser.add_argument("--lambda_cooccur", type=float, default=0.2, help="Weight for premise co-occurrence loss.")
+    parser.add_argument("--preprocessed_dir", type=str, default="/kaggle/working/preprocessed", help="Path to preprocessed .pt files.")
     
     args = parser.parse_args()
+    
+    # Optimize SQLite Access: Copy to /tmp if on /kaggle/input and not preprocessed
+    local_premises = args.premises_db
+    local_states = args.states_db
+    if "/kaggle/input" in args.premises_db and not os.path.exists(os.path.join(args.preprocessed_dir, "premises_processed.pt")):
+        print("Copying databases to local /tmp for faster access...")
+        local_premises = "/tmp/premises.db"
+        local_states = "/tmp/states.db"
+        if not os.path.exists(local_premises): shutil.copy(args.premises_db, local_premises)
+        if not os.path.exists(local_states): shutil.copy(args.states_db, local_states)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -109,17 +121,35 @@ def main():
     
     # 2. Setup Dataset
     dataset = LeanRetrievalDataset(
-        premises_db=args.premises_db,
-        states_db=args.states_db,
-        graph_processor=processor
+        premises_db=local_premises,
+        states_db=local_states,
+        graph_processor=processor,
+        preprocessed_dir=args.preprocessed_dir if os.path.exists(args.preprocessed_dir) else None
     )
+    
+    # IMPORTANT: If already preprocessed, do NOT use num_workers > 0
+    # because each worker will duplicate the RAM cache (~10GB x 4 = OOM)
+    if dataset.use_preprocessed:
+        num_workers = 0
+        pin_memory = False
+        persistent_workers = False
+        prefetch_factor = None
+        print("Using preprocessed data. num_workers set to 0 to avoid RAM duplication.")
+    else:
+        num_workers = 4
+        pin_memory = True
+        persistent_workers = True
+        prefetch_factor = 2
     
     loader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor
     )
 
     # 3. Setup Model

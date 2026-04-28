@@ -1,5 +1,6 @@
 import torch
 import hashlib
+import zlib
 from torch_geometric.data import HeteroData
 from typing import List, Dict, Any, Tuple, Set
 
@@ -242,9 +243,8 @@ class ExprGraphProcessor:
         elif 'level' in node and node['kind'] == 'sort': ident = str(node['level'])
         
         if ident:
-            h = hashlib.md5(ident.encode()).digest()
-            # Take first 4 bytes as a 32-bit int
-            hash_int = int.from_bytes(h[:4], 'big')
+            # Adler32 is much faster than md5 and deterministic across sessions
+            hash_int = zlib.adler32(ident.encode()) & 0xFFFFFFFF
             for i in range(32):
                 if (hash_int >> i) & 1:
                     features[13 + i] = 1.0
