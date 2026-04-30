@@ -107,6 +107,40 @@ class LeanRetrievalDataset(Dataset):
             
         return state_graph, pos_graphs, final_pos_ids
 
+class PrecomputedLeanDataset(Dataset):
+    def __init__(self, precomputed_dir: str, max_positives: int = 10):
+        super().__init__()
+        print(f"Loading precomputed tensors from {precomputed_dir} into RAM...")
+        self.states_list = torch.load(os.path.join(precomputed_dir, "states_list.pt"), weights_only=False)
+        self.premises_dict = torch.load(os.path.join(precomputed_dir, "premises_dict.pt"), weights_only=False)
+        self.max_positives = max_positives
+        print(f"Loaded {len(self.states_list)} states and {len(self.premises_dict)} premises.")
+
+    def len(self):
+        return len(self.states_list)
+
+    def get(self, idx):
+        state_graph, all_pos_ids = self.states_list[idx]
+        
+        # Sample or limit positives
+        if len(all_pos_ids) > self.max_positives:
+            pos_ids = random.sample(all_pos_ids, self.max_positives)
+        else:
+            pos_ids = all_pos_ids
+            
+        pos_graphs = []
+        final_pos_ids = []
+        for pid in pos_ids:
+            if pid in self.premises_dict:
+                pos_graphs.append(self.premises_dict[pid])
+                final_pos_ids.append(pid)
+                
+        if not final_pos_ids:
+            return self.get(random.randint(0, self.len() - 1))
+            
+        return state_graph, pos_graphs, final_pos_ids
+
+
 def collate_fn(batch):
     # Each item: (state_graph, pos_graphs, pos_ids)
     states, pos_graphs_list, pos_ids_list = zip(*batch)

@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from data.processor import ExprGraphProcessor
 from data.symbol_manager import SymbolManager
-from data.data_loader import LeanRetrievalDataset, collate_fn
+from data.data_loader import LeanRetrievalDataset, PrecomputedLeanDataset, collate_fn
 from models.hgt_model import LeanHGT
 
 def get_full_metadata():
@@ -94,6 +94,10 @@ def main():
     parser.add_argument("--temp", type=float, default=0.07)
     parser.add_argument("--lambda_cooccur", type=float, default=0.2, help="Weight for premise co-occurrence loss.")
     
+    # Precomputation Flags
+    parser.add_argument("--use_precomputed", action="store_true", help="Load dataset directly from RAM via precomputed tensors.")
+    parser.add_argument("--precomputed_dir", type=str, default="precomputed", help="Path to precomputed directory.")
+    
     args = parser.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -108,11 +112,16 @@ def main():
     processor = ExprGraphProcessor(symbol_to_id=symbol_manager.symbol_to_id)
     
     # 2. Setup Dataset
-    dataset = LeanRetrievalDataset(
-        premises_db=args.premises_db,
-        states_db=args.states_db,
-        graph_processor=processor
-    )
+    if args.use_precomputed:
+        dataset = PrecomputedLeanDataset(
+            precomputed_dir=args.precomputed_dir
+        )
+    else:
+        dataset = LeanRetrievalDataset(
+            premises_db=args.premises_db,
+            states_db=args.states_db,
+            graph_processor=processor
+        )
     
     loader = DataLoader(
         dataset, 
