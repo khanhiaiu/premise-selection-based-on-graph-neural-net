@@ -128,7 +128,9 @@ def main():
         batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=4,            # Tận dụng 4 CPU cores của Kaggle
+        pin_memory=True,          # Tăng tốc độ copy từ RAM -> GPU VRAM
+        prefetch_factor=2         # Chuẩn bị sẵn 2 batch trong lúc GPU tính toán
     )
 
     # 3. Setup Model
