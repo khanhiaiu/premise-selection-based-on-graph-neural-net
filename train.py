@@ -50,29 +50,7 @@ def multi_positive_infonce_loss(state_embs, premise_embs, positive_mask, tempera
     
     return (log_sum_exp_all - log_sum_exp_pos).mean()
 
-def premise_cooccur_loss(premise_embs, cooccur_mask, temperature=0.07):
-    """
-    Loss to ensure premises used in the same state have similar embeddings.
-    """
-    if not cooccur_mask.any():
-        return torch.tensor(0.0, device=premise_embs.device)
-        
-    logits = torch.matmul(premise_embs, premise_embs.t()) / temperature
-    
-    # For each row (premise i), cooccur_mask[i] identifies its positive pairs
-    # Ignore diagonal (self-similarity) if possible, but standard InfoNCE includes it 
-    # as a "hard negative" if not masked out.
-    
-    log_sum_exp_all = torch.logsumexp(logits, dim=-1)
-    masked_logits = logits.masked_fill(~cooccur_mask, -1e9)
-    log_sum_exp_pos = torch.logsumexp(masked_logits, dim=-1)
-    
-    # Only compute loss for premises that HAVE co-occurring pairs in the batch
-    valid_rows = cooccur_mask.any(dim=-1)
-    if not valid_rows.any():
-        return torch.tensor(0.0, device=premise_embs.device)
-        
-    return (log_sum_exp_all[valid_rows] - log_sum_exp_pos[valid_rows]).mean()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train HGT for Lean 4 Premise Retrieval with Multi-Contrastive Loss.")
@@ -92,11 +70,12 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--temp", type=float, default=0.07)
-    parser.add_argument("--lambda_cooccur", type=float, default=0.2, help="Weight for premise co-occurrence loss.")
-    
     # Precomputation Flags
     parser.add_argument("--use_precomputed", action="store_true", help="Load dataset directly from RAM via precomputed tensors.")
-    parser.add_argument("--precomputed_dir", type=str, default="precomputed", help="Path to precomputed directory.")
+    parser.add_argument("--precomputed_train_path", type=str, default="precomputed/states_list_train.pt")
+    parser.add_argument("--precomputed_val_path", type=str, default="precomputed/states_list_val.pt")
+    parser.add_argument("--precomputed_premises_path", type=str, default="precomputed/premises_dict.pt")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint to resume training from")
     
     args = parser.parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -113,18 +92,25 @@ def main():
     
     # 2. Setup Dataset
     if args.use_precomputed:
-        dataset = PrecomputedLeanDataset(
-            precomputed_dir=args.precomputed_dir
+        train_dataset = PrecomputedLeanDataset(
+            states_list_path=args.precomputed_train_path,
+            premises_dict_path=args.precomputed_premises_path
+        )
+        val_dataset = PrecomputedLeanDataset(
+            states_list_path=args.precomputed_val_path,
+            premises_dict_path=args.precomputed_premises_path
         )
     else:
-        dataset = LeanRetrievalDataset(
+        # Fallback to sqlite (Note: this is just a placeholder, real split is not implemented for sqlite here)
+        train_dataset = LeanRetrievalDataset(
             premises_db=args.premises_db,
             states_db=args.states_db,
             graph_processor=processor
         )
+        val_dataset = None
     
-    loader = DataLoader(
-        dataset, 
+    train_loader = DataLoader(
+        train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
         collate_fn=collate_fn,
@@ -132,6 +118,18 @@ def main():
         pin_memory=True,          # Tăng tốc độ copy từ RAM -> GPU VRAM
         prefetch_factor=2         # Chuẩn bị sẵn 2 batch trong lúc GPU tính toán
     )
+    
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=args.batch_size, 
+            shuffle=False, 
+            collate_fn=collate_fn,
+            num_workers=4,
+            pin_memory=True
+        )
+    else:
+        val_loader = None
 
     # 3. Setup Model
     metadata = get_full_metadata()
@@ -145,59 +143,93 @@ def main():
         num_heads=args.num_heads,
         num_layers=args.num_layers
     ).to(device)
+
+    # 4. Resume from Checkpoint
+    start_epoch = 0
+    if args.resume_from is not None:
+        if os.path.exists(args.resume_from):
+            print(f"Resuming from checkpoint: {args.resume_from}")
+            checkpoint = torch.load(args.resume_from, map_location=device)
+            # Support both old format (state_dict directly) and new format (dict with 'model_state_dict')
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                start_epoch = checkpoint.get('epoch', 0)
+            else:
+                model.load_state_dict(checkpoint)
+        else:
+            print(f"Warning: Checkpoint {args.resume_from} not found. Starting from scratch.")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # 4. Training Loop
-    print(f"Starting MCL training (lambda_cooccur={args.lambda_cooccur})...")
-    for epoch in range(args.epochs):
+    # 5. Training Loop
+    print(f"Starting InfoNCE training...")
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         total_loss = 0
-        total_t1 = 0
-        total_t3 = 0
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         
         for batch in pbar:
-            if not isinstance(batch, (list, tuple)) or len(batch) != 4:
-                print(f"DEBUG: Unexpected batch type {type(batch)} with length {len(batch) if hasattr(batch, '__len__') else 'N/A'}")
-            states, prems, pos_mask, cooccur_mask = batch
+            if not isinstance(batch, (list, tuple)) or len(batch) != 3:
+                continue
+            states, prems, pos_mask = batch
             states = states.to(device)
             prems = prems.to(device)
             pos_mask = pos_mask.to(device)
-            cooccur_mask = cooccur_mask.to(device)
             
             optimizer.zero_grad()
             
             state_embs = model(states.x_dict, states.edge_index_dict)
             premise_embs = model(prems.x_dict, prems.edge_index_dict)
             
-            l_t1 = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
-            l_t3 = premise_cooccur_loss(premise_embs, cooccur_mask, temperature=args.temp)
-            
-            loss = l_t1 + args.lambda_cooccur * l_t3
+            loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
             total_loss += loss.item()
-            total_t1 += l_t1.item()
-            total_t3 += l_t3.item()
-            pbar.set_postfix({
-                "L": f"{loss.item():.3f}",
-                "T1": f"{l_t1.item():.3f}",
-                "T3": f"{l_t3.item():.3f}"
-            })
+            pbar.set_postfix({"Loss": f"{loss.item():.3f}"})
             
-        avg_loss = total_loss / len(loader)
-        avg_t1 = total_t1 / len(loader)
-        avg_t3 = total_t3 / len(loader)
-        print(f"Epoch {epoch+1} Complete. Loss: {avg_loss:.4f} (T1: {avg_t1:.4f}, T3: {avg_t3:.4f})")
+        avg_train_loss = total_loss / len(train_loader)
+        
+        # Validation Loop
+        avg_val_loss = 0.0
+        if val_loader is not None:
+            model.eval()
+            total_val_loss = 0
+            with torch.no_grad():
+                val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Valid]")
+                for batch in val_pbar:
+                    if not isinstance(batch, (list, tuple)) or len(batch) != 3:
+                        continue
+                    states, prems, pos_mask = batch
+                    states = states.to(device)
+                    prems = prems.to(device)
+                    pos_mask = pos_mask.to(device)
+                    
+                    state_embs = model(states.x_dict, states.edge_index_dict)
+                    premise_embs = model(prems.x_dict, prems.edge_index_dict)
+                    
+                    val_loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
+                    total_val_loss += val_loss.item()
+                    val_pbar.set_postfix({"Val Loss": f"{val_loss.item():.3f}"})
+                    
+            avg_val_loss = total_val_loss / len(val_loader)
+            print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        else:
+            print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f}")
+            
         scheduler.step()
         
         os.makedirs("checkpoints", exist_ok=True)
-        torch.save(model.state_dict(), f"checkpoints/hgt_mcl_epoch_{epoch+1}.pt")
+        checkpoint_path = f"checkpoints/hgt_epoch_{epoch+1}_val_loss_{avg_val_loss:.3f}.pt"
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': avg_val_loss
+        }, checkpoint_path)
 
 if __name__ == "__main__":
     main()

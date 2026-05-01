@@ -108,11 +108,11 @@ class LeanRetrievalDataset(Dataset):
         return state_graph, pos_graphs, final_pos_ids
 
 class PrecomputedLeanDataset(Dataset):
-    def __init__(self, precomputed_dir: str, max_positives: int = 10):
+    def __init__(self, states_list_path: str, premises_dict_path: str, max_positives: int = 10):
         super().__init__()
-        print(f"Loading precomputed tensors from {precomputed_dir} into RAM...")
-        self.states_list = torch.load(os.path.join(precomputed_dir, "states_list.pt"), weights_only=False)
-        self.premises_dict = torch.load(os.path.join(precomputed_dir, "premises_dict.pt"), weights_only=False)
+        print(f"Loading precomputed tensors from {states_list_path} and {premises_dict_path} into RAM...")
+        self.states_list = torch.load(states_list_path, weights_only=False)
+        self.premises_dict = torch.load(premises_dict_path, weights_only=False)
         self.max_positives = max_positives
         print(f"Loaded {len(self.states_list)} states and {len(self.premises_dict)} premises.")
 
@@ -164,16 +164,9 @@ def collate_fn(batch):
     num_unique_prems = len(unique_premise_ids)
     
     pos_mask = torch.zeros((num_states, num_unique_prems), dtype=torch.bool)
-    cooccur_mask = torch.zeros((num_unique_prems, num_unique_prems), dtype=torch.bool)
     
     for i in range(num_states):
         p_indices = [id_to_idx[pid] for pid in pos_ids_list[i] if pid in id_to_idx]
         pos_mask[i, p_indices] = True
-        
-        # Co-occurrence: all pairs in pos_indices
-        for idx_a in p_indices:
-            for idx_b in p_indices:
-                if idx_a != idx_b:
-                    cooccur_mask[idx_a, idx_b] = True
                     
-    return batched_states, batched_premises, pos_mask, cooccur_mask
+    return batched_states, batched_premises, pos_mask
