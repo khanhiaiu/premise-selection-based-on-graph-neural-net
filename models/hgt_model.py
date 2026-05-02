@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from torch_geometric.nn import HGTConv, Linear
 from typing import Dict, List, Tuple
 
@@ -71,10 +70,6 @@ class LeanHGT(nn.Module):
             nn.GELU(),
             Linear(hidden_channels, out_channels)
         )
-        
-        # Learnable Temperature (Logit Scale)
-        # Initialized to ln(1/0.07) ~ 2.6592
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         # Symbol Residual
         self.symbol_residual = nn.Parameter(torch.zeros(hidden_channels))
