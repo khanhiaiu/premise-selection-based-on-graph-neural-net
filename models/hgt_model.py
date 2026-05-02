@@ -64,12 +64,8 @@ class LeanHGT(nn.Module):
             conv = HGTConv(hidden_channels, hidden_channels, metadata, num_heads)
             self.convs.append(conv)
             
-        # 3. Output Readout (Projection Head)
-        self.projection_head = nn.Sequential(
-            Linear(hidden_channels, hidden_channels),
-            nn.GELU(),
-            Linear(hidden_channels, out_channels)
-        )
+        # 3. Output Readout
+        self.out_lin = Linear(hidden_channels, out_channels)
         
         # Symbol Residual
         self.symbol_residual = nn.Parameter(torch.zeros(hidden_channels))
@@ -105,9 +101,9 @@ class LeanHGT(nn.Module):
             h_dict = conv(h_dict, edge_index_dict)
             h_dict = {k: F.gelu(v) for k, v in h_dict.items()}
             
-        # Readout: Extract virtual node embeddings and project
+        # Readout: Extract virtual node embeddings
         # These represent the global state of each graph in the batch
-        out = self.projection_head(h_dict['virtual'])
+        out = self.out_lin(h_dict['virtual'])
         
         # Normalization for contrastive learning
         out = F.normalize(out, p=2, dim=1)
