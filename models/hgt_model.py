@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch_geometric.nn import HGTConv, Linear
 from typing import Dict, List, Tuple
 
@@ -64,8 +65,16 @@ class LeanHGT(nn.Module):
             conv = HGTConv(hidden_channels, hidden_channels, metadata, num_heads)
             self.convs.append(conv)
             
-        # 3. Output Readout
-        self.out_lin = Linear(hidden_channels, out_channels)
+        # 3. Output Readout (Projection Head)
+        self.projection_head = nn.Sequential(
+            Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            Linear(hidden_channels, out_channels)
+        )
+        
+        # Learnable Temperature (Logit Scale)
+        # Initialized to ln(1/0.07) ~ 2.6592
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         # Symbol Residual
         self.symbol_residual = nn.Parameter(torch.zeros(hidden_channels))
@@ -101,9 +110,9 @@ class LeanHGT(nn.Module):
             h_dict = conv(h_dict, edge_index_dict)
             h_dict = {k: F.gelu(v) for k, v in h_dict.items()}
             
-        # Readout: Extract virtual node embeddings
+        # Readout: Extract virtual node embeddings and project
         # These represent the global state of each graph in the batch
-        out = self.out_lin(h_dict['virtual'])
+        out = self.projection_head(h_dict['virtual'])
         
         # Normalization for contrastive learning
         out = F.normalize(out, p=2, dim=1)

@@ -32,13 +32,15 @@ def get_full_metadata():
     
     return node_types, edge_types
 
-def multi_positive_infonce_loss(state_embs, premise_embs, positive_mask, temperature=0.07):
+def multi_positive_infonce_loss(state_embs, premise_embs, positive_mask, logit_scale):
     """
     Adapted InfoNCE for multiple positives per state.
     L = log(sum(exp(all_sim))) - log(sum(exp(pos_sim)))
     """
     # [num_states, num_premises]
-    logits = torch.matmul(state_embs, premise_embs.t()) / temperature
+    # logit_scale acts as 1 / temperature
+    scale = logit_scale.exp()
+    logits = torch.matmul(state_embs, premise_embs.t()) * scale
     
     # Denominator: logsumexp over all premises
     log_sum_exp_all = torch.logsumexp(logits, dim=-1)
@@ -69,7 +71,6 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--temp", type=float, default=0.07)
     # Precomputation Flags
     parser.add_argument("--use_precomputed", action="store_true", help="Load dataset directly from RAM via precomputed tensors.")
     parser.add_argument("--precomputed_train_path", type=str, default="precomputed/states_list_train.pt")
@@ -182,7 +183,7 @@ def main():
             state_embs = model(states.x_dict, states.edge_index_dict)
             premise_embs = model(prems.x_dict, prems.edge_index_dict)
             
-            loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
+            loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, model.logit_scale)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -211,7 +212,7 @@ def main():
                     state_embs = model(states.x_dict, states.edge_index_dict)
                     premise_embs = model(prems.x_dict, prems.edge_index_dict)
                     
-                    val_loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
+                    val_loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, model.logit_scale)
                     total_val_loss += val_loss.item()
                     val_pbar.set_postfix({"Val Loss": f"{val_loss.item():.3f}"})
                     
