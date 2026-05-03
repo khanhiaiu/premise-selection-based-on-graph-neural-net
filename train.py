@@ -3,6 +3,9 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from data.processor import ExprGraphProcessor
@@ -79,15 +82,32 @@ def main():
     parser.add_argument("--resume_from", type=str, default=None, help="Path to checkpoint to resume training from")
     
     args = parser.parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    
+    # DDP Initialization
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
+
+    if is_distributed:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        rank = 0
+        world_size = 1
+
+    if rank == 0:
+        print(f"Using device: {device}, distributed: {is_distributed}")
 
     # 1. Initialize Managers
     symbol_manager = SymbolManager(vocab_path=args.vocab_path)
     if os.path.exists(args.embeddings_path):
         symbol_manager.load_embeddings(args.embeddings_path)
     else:
-        print(f"Warning: {args.embeddings_path} not found. Model will use random initialization for symbols.")
+        if rank == 0:
+            print(f"Warning: {args.embeddings_path} not found. Model will use random initialization for symbols.")
         
     processor = ExprGraphProcessor(symbol_to_id=symbol_manager.symbol_to_id)
     
@@ -110,10 +130,12 @@ def main():
         )
         val_dataset = None
     
+    train_sampler = DistributedSampler(train_dataset) if is_distributed else None
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
-        shuffle=True, 
+        shuffle=(train_sampler is None), 
+        sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=4,            # Tận dụng 4 CPU cores của Kaggle
         pin_memory=True,          # Tăng tốc độ copy từ RAM -> GPU VRAM
@@ -121,10 +143,12 @@ def main():
     )
     
     if val_dataset is not None:
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
         val_loader = DataLoader(
             val_dataset, 
             batch_size=args.batch_size, 
             shuffle=False, 
+            sampler=val_sampler,
             collate_fn=collate_fn,
             num_workers=4,
             pin_memory=True
@@ -134,7 +158,8 @@ def main():
 
     # 3. Setup Model
     metadata = get_full_metadata()
-    print(f"Model Metadata initialized with {len(metadata[1])} edge types.")
+    if rank == 0:
+        print(f"Model Metadata initialized with {len(metadata[1])} edge types.")
     
     model = LeanHGT(
         metadata=metadata,
@@ -150,16 +175,25 @@ def main():
     checkpoint_data = None
     if args.resume_from is not None:
         if os.path.exists(args.resume_from):
-            print(f"Resuming from checkpoint: {args.resume_from}")
+            if rank == 0:
+                print(f"Resuming from checkpoint: {args.resume_from}")
             checkpoint_data = torch.load(args.resume_from, map_location=device)
             # Support both old format (state_dict directly) and new format (dict with 'model_state_dict')
             if isinstance(checkpoint_data, dict) and 'model_state_dict' in checkpoint_data:
-                model.load_state_dict(checkpoint_data['model_state_dict'])
+                state_dict = checkpoint_data['model_state_dict']
+                # Remove 'module.' prefix if it exists to allow loading into base model
+                state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                model.load_state_dict(state_dict)
                 start_epoch = checkpoint_data.get('epoch', 0)
             else:
-                model.load_state_dict(checkpoint_data)
+                state_dict = {k.replace('module.', ''): v for k, v in checkpoint_data.items()}
+                model.load_state_dict(state_dict)
         else:
-            print(f"Warning: Checkpoint {args.resume_from} not found. Starting from scratch.")
+            if rank == 0:
+                print(f"Warning: Checkpoint {args.resume_from} not found. Starting from scratch.")
+    
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     # T_max is the absolute end of the learning rate schedule
@@ -170,27 +204,43 @@ def main():
         if 'optimizer_state_dict' in checkpoint_data:
             try:
                 optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
-                print("Successfully loaded optimizer state.")
+                if rank == 0:
+                    print("Successfully loaded optimizer state.")
             except Exception as e:
-                print(f"Warning: Could not load optimizer state: {e}")
+                if rank == 0:
+                    print(f"Warning: Could not load optimizer state: {e}")
         
         if 'scheduler_state_dict' in checkpoint_data:
             try:
                 scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
-                print("Successfully loaded scheduler state.")
+                if rank == 0:
+                    print("Successfully loaded scheduler state.")
             except Exception as e:
-                print(f"Warning: Could not load scheduler state: {e}")
+                if rank == 0:
+                    print(f"Warning: Could not load scheduler state: {e}")
 
     # 5. Training Loop
     if start_epoch >= args.epochs:
-        print(f"Already reached target session epoch {args.epochs}. Nothing to do.")
+        if rank == 0:
+            print(f"Already reached target session epoch {args.epochs}. Nothing to do.")
+        if is_distributed:
+            dist.destroy_process_group()
         return
 
-    print(f"Starting session: Epoch {start_epoch+1} -> {args.epochs} (Full schedule: {args.max_epochs})")
+    if rank == 0:
+        print(f"Starting session: Epoch {start_epoch+1} -> {args.epochs} (Full schedule: {args.max_epochs})")
+        
     for epoch in range(start_epoch, args.epochs):
+        if is_distributed:
+            train_sampler.set_epoch(epoch)
+            
         model.train()
         total_loss = 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
+        
+        if rank == 0:
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
+        else:
+            pbar = train_loader
         
         for batch in pbar:
             if not isinstance(batch, (list, tuple)) or len(batch) != 3:
@@ -202,6 +252,7 @@ def main():
             
             optimizer.zero_grad()
             
+            # Forward pass
             state_embs = model(states.x_dict, states.edge_index_dict)
             premise_embs = model(prems.x_dict, prems.edge_index_dict)
             
@@ -212,7 +263,8 @@ def main():
             optimizer.step()
             
             total_loss += loss.item()
-            pbar.set_postfix({"Loss": f"{loss.item():.3f}"})
+            if rank == 0:
+                pbar.set_postfix({"Loss": f"{loss.item():.3f}"})
             
         avg_train_loss = total_loss / len(train_loader)
         
@@ -222,7 +274,11 @@ def main():
             model.eval()
             total_val_loss = 0
             with torch.no_grad():
-                val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Valid]")
+                if rank == 0:
+                    val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Valid]")
+                else:
+                    val_pbar = val_loader
+                    
                 for batch in val_pbar:
                     if not isinstance(batch, (list, tuple)) or len(batch) != 3:
                         continue
@@ -236,24 +292,38 @@ def main():
                     
                     val_loss = multi_positive_infonce_loss(state_embs, premise_embs, pos_mask, temperature=args.temp)
                     total_val_loss += val_loss.item()
-                    val_pbar.set_postfix({"Val Loss": f"{val_loss.item():.3f}"})
                     
-            avg_val_loss = total_val_loss / len(val_loader)
-            print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+                    if rank == 0:
+                        val_pbar.set_postfix({"Val Loss": f"{val_loss.item():.3f}"})
+            
+            # Aggregate validation loss across GPUs
+            val_loss_tensor = torch.tensor([total_val_loss], device=device)
+            if is_distributed:
+                dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+            
+            avg_val_loss = val_loss_tensor.item() / (len(val_loader) * world_size)
+            
+            if rank == 0:
+                print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
         else:
-            print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f}")
+            if rank == 0:
+                print(f"Epoch {epoch+1} Complete. Train Loss: {avg_train_loss:.4f}")
             
         scheduler.step()
         
-        os.makedirs("checkpoints", exist_ok=True)
-        checkpoint_path = f"checkpoints/hgt_epoch_{epoch+1}_val_loss_{avg_val_loss:.3f}.pt"
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'val_loss': avg_val_loss
-        }, checkpoint_path)
+        if rank == 0:
+            os.makedirs("checkpoints", exist_ok=True)
+            checkpoint_path = f"checkpoints/hgt_epoch_{epoch+1}_val_loss_{avg_val_loss:.3f}.pt"
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'val_loss': avg_val_loss
+            }, checkpoint_path)
+
+    if is_distributed:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
