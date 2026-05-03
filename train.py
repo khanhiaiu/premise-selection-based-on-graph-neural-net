@@ -68,7 +68,8 @@ def main():
     # Training Hparams
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=20, help="Epoch to train until in this session.")
+    parser.add_argument("--max_epochs", type=int, default=20, help="Total epochs for the cosine decay schedule.")
     parser.add_argument("--temp", type=float, default=0.07)
     # Precomputation Flags
     parser.add_argument("--use_precomputed", action="store_true", help="Load dataset directly from RAM via precomputed tensors.")
@@ -146,24 +147,46 @@ def main():
 
     # 4. Resume from Checkpoint
     start_epoch = 0
+    checkpoint_data = None
     if args.resume_from is not None:
         if os.path.exists(args.resume_from):
             print(f"Resuming from checkpoint: {args.resume_from}")
-            checkpoint = torch.load(args.resume_from, map_location=device)
+            checkpoint_data = torch.load(args.resume_from, map_location=device)
             # Support both old format (state_dict directly) and new format (dict with 'model_state_dict')
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-                start_epoch = checkpoint.get('epoch', 0)
+            if isinstance(checkpoint_data, dict) and 'model_state_dict' in checkpoint_data:
+                model.load_state_dict(checkpoint_data['model_state_dict'])
+                start_epoch = checkpoint_data.get('epoch', 0)
             else:
-                model.load_state_dict(checkpoint)
+                model.load_state_dict(checkpoint_data)
         else:
             print(f"Warning: Checkpoint {args.resume_from} not found. Starting from scratch.")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # T_max is the absolute end of the learning rate schedule
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epochs)
+
+    # Load Optimizer and Scheduler states if they exist
+    if checkpoint_data and isinstance(checkpoint_data, dict):
+        if 'optimizer_state_dict' in checkpoint_data:
+            try:
+                optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                print("Successfully loaded optimizer state.")
+            except Exception as e:
+                print(f"Warning: Could not load optimizer state: {e}")
+        
+        if 'scheduler_state_dict' in checkpoint_data:
+            try:
+                scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                print("Successfully loaded scheduler state.")
+            except Exception as e:
+                print(f"Warning: Could not load scheduler state: {e}")
 
     # 5. Training Loop
-    print(f"Starting InfoNCE training...")
+    if start_epoch >= args.epochs:
+        print(f"Already reached target session epoch {args.epochs}. Nothing to do.")
+        return
+
+    print(f"Starting session: Epoch {start_epoch+1} -> {args.epochs} (Full schedule: {args.max_epochs})")
     for epoch in range(start_epoch, args.epochs):
         model.train()
         total_loss = 0
@@ -228,6 +251,7 @@ def main():
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'val_loss': avg_val_loss
         }, checkpoint_path)
 
