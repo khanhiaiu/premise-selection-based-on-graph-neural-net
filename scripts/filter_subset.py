@@ -28,11 +28,12 @@ def setup_db(db_path, is_premises=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--states_db", default="states.db", type=str)
-    parser.add_argument("--premises_db", default="premises.db", type=str)
-    parser.add_argument("--out_states_db", default="states_50k.db", type=str)
-    parser.add_argument("--out_premises_db", default="premises_50k.db", type=str)
-    parser.add_argument("--num_states", default=50000, type=int)
+    parser.add_argument("--states_db", default="datatrain/states.db", type=str)
+    parser.add_argument("--premises_db", default="datatrain/premises.db", type=str)
+    parser.add_argument("--out_states_db", default="datatrain/states_210k.db", type=str)
+    parser.add_argument("--out_premises_db", default="datatrain/premises_210k.db", type=str)
+    parser.add_argument("--num_states", default=210000, type=int)
+    parser.add_argument("--process_all", action="store_true", help="Process all states in DB, ignoring num_states")
     parser.add_argument("--max_nodes", default=100, type=int, help="Max nodes in graph for both state and premise")
     args = parser.parse_args()
 
@@ -59,13 +60,21 @@ def main():
     
     cur_s_in.execute("SELECT id, json_data FROM states")
     
-    pbar = tqdm(total=args.num_states, desc="Filtering States & Premises")
+    pbar_total = total_states if args.process_all else args.num_states
+    pbar = tqdm(total=pbar_total, desc="Filtering States & Premises")
     
-    while states_saved < args.num_states:
+    while True:
+        if not args.process_all and states_saved >= args.num_states:
+            break
+            
         row = cur_s_in.fetchone()
         if row is None:
-            print("Reached end of states.db before hitting target!")
+            if not args.process_all:
+                print("Reached end of states.db before hitting target!")
             break
+            
+        if args.process_all:
+            pbar.update(1)
             
         state_id, state_json_str = row
         state_data = json.loads(state_json_str)
@@ -115,7 +124,8 @@ def main():
             saved_premises.add(pid)
             
         states_saved += 1
-        pbar.update(1)
+        if not args.process_all:
+            pbar.update(1)
         
         # Commit every 1000 states to avoid massive RAM usage for transaction
         if states_saved % 1000 == 0:
