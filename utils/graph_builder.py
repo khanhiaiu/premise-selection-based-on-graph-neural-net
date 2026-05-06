@@ -99,7 +99,13 @@ class StateGraphBuilder:
             tree_json = json.loads(tree_json)
             
         # 1. Parse tree JSON to DAG
-        dag_nodes = convert_tree_to_dag(tree_json)
+        if isinstance(tree_json, list):
+            # Already a DAG/list of nodes
+            dag_nodes = tree_json
+        else:
+            # It's a nested tree, need to convert
+            dag_nodes = convert_tree_to_dag(tree_json)
+            
         if dag_nodes is None or len(dag_nodes) == 0:
             raise ValueError("Failed to convert tree to DAG or graph is empty.")
             

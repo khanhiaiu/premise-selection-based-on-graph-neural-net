@@ -46,12 +46,11 @@ def process_state_row(row):
 
 def main():
     parser = argparse.ArgumentParser()
-    # parser.add_argument("--states_db", default="states_50k.db", type=str)
     parser.add_argument("--premises_db", default="datatrain/premises.db", type=str)
     parser.add_argument("--vocab_path", default="datatrain/symbol_vocab.json", type=str)
     parser.add_argument("--out_dir", default="datatrain/precomputed", type=str)
-    parser.add_argument("--num_workers", default=1, type=int)
-    parser.add_argument("--max_nodes", default=100, type=int, help="Max nodes to include")
+    parser.add_argument("--num_workers", default=cpu_count(), type=int)
+    parser.add_argument("--max_nodes", default=512, type=int, help="Max nodes to include")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -60,38 +59,50 @@ def main():
     print(f"Reading premises from {args.premises_db}...")
     conn_p = sqlite3.connect(args.premises_db)
     cur_p = conn_p.cursor()
+    
+    cur_p.execute("SELECT count(*) FROM premises")
+    total_rows = cur_p.fetchone()[0]
+    
     cur_p.execute("SELECT id, json_data FROM premises")
     premise_rows = cur_p.fetchall()
     
-    print(f"Precomputing premises (max_nodes < {args.max_nodes}) using {args.num_workers} workers...")
-    premises_dict = {}
+    print(f"Precomputing {len(premise_rows)} premises (max_nodes < {args.max_nodes}) using {args.num_workers} workers...")
+    
+    # Tạo database tạm thời để lưu kết quả trung gian
+    temp_db = "temp_premises.db"
+    if os.path.exists(temp_db): os.remove(temp_db)
+    conn_temp = sqlite3.connect(temp_db)
+    cur_temp = conn_temp.cursor()
+    cur_temp.execute("CREATE TABLE IF NOT EXISTS temp_graphs (id TEXT, graph_data BLOB)")
+    
+    import pickle
+    count = 0
     with Pool(args.num_workers, initializer=init_worker, initargs=(args.vocab_path, args.max_nodes)) as pool:
         for pid, graph in tqdm(pool.imap_unordered(process_premise_row, premise_rows), total=len(premise_rows), desc="Premises"):
             if graph is not None:
-                premises_dict[pid] = graph
-
-    out_p = os.path.join(args.out_dir, "premises_dict.pt")
+                cur_temp.execute("INSERT INTO temp_graphs VALUES (?, ?)", (pid, pickle.dumps(graph)))
+                count += 1
+                if count % 500 == 0:
+                    conn_temp.commit()
+    
+    conn_temp.commit()
+    
+    # BƯỚC CUỐI: Chuyển từ DB tạm sang file .pt
+    print(f"\nĐang tập hợp {count} premises vào RAM để lưu file .pt...")
+    premises_dict = {}
+    cur_temp.execute("SELECT id, graph_data FROM temp_graphs")
+    for pid, graph_blob in cur_temp:
+        premises_dict[pid] = pickle.loads(graph_blob)
+    
+    conn_temp.close()
+    if os.path.exists(temp_db): os.remove(temp_db) # Xóa file tạm
+    
+    out_p = os.path.join(args.out_dir, "premises_dict_full.pt")
+    print(f"Đang ghi file: {out_p}...")
     torch.save(premises_dict, out_p)
-    print(f"Saved {len(premises_dict)} premises to {out_p} ({os.path.getsize(out_p) / 1024 / 1024:.2f} MB)")
-
-    # # 2. PRECOMPUTE STATES
-    # if hasattr(args, 'states_db') and os.path.exists(args.states_db):
-    #     print(f"\nReading states from {args.states_db}...")
-    #     conn_s = sqlite3.connect(args.states_db)
-    #     cur_s = conn_s.cursor()
-    #     cur_s.execute("SELECT id, json_data FROM states")
-    #     state_rows = cur_s.fetchall()
-
-    #     print(f"Precomputing states (max_nodes < {args.max_nodes}) using {args.num_workers} workers...")
-    #     states_list = []
-    #     with Pool(args.num_workers, initializer=init_worker, initargs=(args.vocab_path, args.max_nodes)) as pool:
-    #         for graph, target_premises in tqdm(pool.imap_unordered(process_state_row, state_rows), total=len(state_rows), desc="States"):
-    #             if graph is not None:
-    #                 states_list.append((graph, target_premises))
-
-    #     out_s = os.path.join(args.out_dir, "states_list.pt")
-    #     torch.save(states_list, out_s)
-    #     print(f"Saved {len(states_list)} states to {out_s} ({os.path.getsize(out_s) / 1024 / 1024:.2f} MB)")
+    
+    print(f"DONE! Đã lưu {len(premises_dict)} premises vào {out_p}")
+    conn_p.close()
 
 if __name__ == "__main__":
     main()

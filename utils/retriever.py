@@ -1,6 +1,8 @@
 import os
 import sys
 import torch
+import sqlite3
+import json
 from torch_geometric.data import Batch
 
 # Fix path
@@ -28,11 +30,13 @@ class LeanRetriever:
                  model_path="checkpoints/hgt_epoch_29_val_loss_1.858.pt",
                  vocab_path="datatrain/symbol_vocab.json",
                  embeddings_path="datatrain/symbol_embeddings.pt",
-                 precomputed_premises_path="datatrain/precomputed_50k/premises_dict.pt",
-                 premise_embeddings_path="datatrain/precomputed_50k/premise_embeddings.pt",
+                 precomputed_premises_path="datatrain/precomputed/premises_dict.pt",
+                 premise_embeddings_path="datatrain/precomputed/premise_embeddings.pt",
+                 db_path="datatrain/premises_50k.db",
                  device="cpu",
                  max_premises=None):
         self.device = torch.device(device)
+        self.db_path = db_path
         print(f"Loading Retriever on {self.device}...")
         
         # Load symbol manager
@@ -122,6 +126,25 @@ class LeanRetriever:
             idx = indices[i].item()
             score = scores[i].item()
             pid = self.all_pids[idx]
-            results.append((pid, score))
+            
+            # Fetch raw text from DB
+            raw_text = self._fetch_raw_text(pid)
+            results.append((pid, score, raw_text))
             
         return results
+
+    def _fetch_raw_text(self, pid):
+        if not self.db_path or not os.path.exists(self.db_path):
+            return "No preview available (DB not found)"
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT json_data FROM premises WHERE id = ?", (pid,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                data = json.loads(row[0])
+                return data.get("raw_text", "No preview available")
+        except Exception as e:
+            return f"Error fetching preview: {str(e)}"
+        return "Not found in DB"

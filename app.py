@@ -18,12 +18,12 @@ def init_models():
     print("Initializing models on CPU...")
     builder = StateGraphBuilder(vocab_path="datatrain/symbol_vocab.json")
     retriever = LeanRetriever(
-        model_path="checkpoints/hgt_epoch_29_val_loss_1.858.pt",
+        model_path="checkpoints/leanhgt.pt",
         vocab_path="datatrain/symbol_vocab.json",
         embeddings_path="datatrain/symbol_embeddings.pt",
-        precomputed_premises_path="datatrain/precomputed_50k/premises_dict.pt",
-        device="cpu",
-        max_premises=5
+        precomputed_premises_path="datatrain/precomputed/premises_dict.pt",
+        premise_embeddings_path="premise embedded/premise_embeddings.pt",
+        device="cpu"
     )
     print("Models initialized successfully!")
 
@@ -59,8 +59,12 @@ def retrieve_premises(lean_code_str, top_k):
         try:
             results = retriever.retrieve(hetero_data, top_k=int(top_k))
             output_str = f"=== GRAPH STATS ===\n{graph_stats}\n\n=== RETRIEVAL RESULTS (Top {top_k}) ===\n"
-            for i, (pid, score) in enumerate(results):
-                output_str += f"{i+1}. {pid} (Score: {score:.4f})\n"
+            output_str += "="*40 + "\n"
+            for i, (pid, score, raw_text) in enumerate(results):
+                output_str += f"RANK {i+1} | SCORE: {score:.4f}\n"
+                output_str += f"ID: {pid}\n"
+                output_str += f"CODE:\n{raw_text}\n"
+                output_str += "-"*40 + "\n"
             return output_str
         except Exception as e:
             return f"Error during retrieval:\n{traceback.format_exc()}"
