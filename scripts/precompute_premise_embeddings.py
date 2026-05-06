@@ -69,6 +69,9 @@ def main():
 
     P_matrix = torch.cat(all_premise_embs, dim=0) # [num_premises, hidden_dim]
     
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
+    
     print(f"Saving premise matrix {P_matrix.shape} to {args.output_path}...")
     torch.save({
         'pids': all_pids,
