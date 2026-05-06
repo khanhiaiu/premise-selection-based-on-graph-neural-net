@@ -23,6 +23,7 @@ def init_models():
         embeddings_path="datatrain/symbol_embeddings.pt",
         precomputed_premises_path="datatrain/precomputed/premises_dict.pt",
         premise_embeddings_path="premise embedded/premise_embeddings.pt",
+        db_path="datatrain/premises.db",
         device="cpu"
     )
     print("Models initialized successfully!")

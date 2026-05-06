@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from torch_geometric.data import Batch
+import faiss
+import numpy as np
 
 # Fix sys path to import models and data
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -60,8 +62,14 @@ class StateDataset(Dataset):
         return self.states[idx]
 
 def collate_states(batch):
-    graphs, target_pids_list = zip(*batch)
-    return Batch.from_data_list(graphs), list(target_pids_list)
+    # Hỗ trợ cả định dạng cũ (tuple) và định dạng mới (dict có sid)
+    if isinstance(batch[0], dict):
+        graphs = [item['graph'] for item in batch]
+        target_pids = [item['target_premises'] for item in batch]
+    else:
+        graphs = [item[0] for item in batch]
+        target_pids = [item[1] for item in batch]
+    return Batch.from_data_list(graphs), target_pids
 
 def main():
     parser = argparse.ArgumentParser()
@@ -121,14 +129,22 @@ def main():
     all_pids = []
     
     with torch.no_grad():
-        for pids, graphs in premise_loader:
+        for pids, graphs in tqdm(premise_loader, desc="Premises"):
             graphs = graphs.to(device)
             embs = model(graphs.x_dict, graphs.edge_index_dict)
             all_premise_embs.append(embs.cpu())
             all_pids.extend(pids)
             
     P_matrix = torch.cat(all_premise_embs, dim=0).to(device) # [num_premises, hidden_dim]
-    print(f"Premise matrix shape: [204914, 512]")
+    print(f"Premise matrix shape: {P_matrix.shape}")
+    
+    # Initialize FAISS Index (GPU if possible)
+    print("Initializing FAISS index...")
+    d = P_matrix.shape[1]
+    res = faiss.StandardGpuResources()
+    # FlatIP = Inner Product (same as Cosine Sim for normalized vectors)
+    index = faiss.index_cpu_to_gpu(res, 0, faiss.IndexFlatIP(d))
+    index.add(P_matrix.cpu().numpy())
     
     # 2. Compute state embeddings and evaluate
     print("Evaluating states...")
@@ -138,42 +154,36 @@ def main():
     total_states = 0
     
     with torch.no_grad():
+        # Pre-map PIDs to indices for fast lookup
+        pid_to_idx = {pid: i for i, pid in enumerate(all_pids)}
+        
         for graphs, target_pids_list in tqdm(state_loader, desc="States"):
             graphs = graphs.to(device)
-            state_embs = model(graphs.x_dict, graphs.edge_index_dict) # [batch_size, hidden_dim]
+            state_embs = model(graphs.x_dict, graphs.edge_index_dict)
             
-            # Compute similarity: state_embs @ P_matrix.T
-            # Both are normalized, so dot product == cosine similarity
-            sim_scores = torch.matmul(state_embs, P_matrix.t()) # [batch_size, num_premises]
+            # FAISS search
+            state_embs_np = state_embs.cpu().numpy()
+            D, I = index.search(state_embs_np, k=args.k)
             
-            # Get top K indices
-            # For MRR we need ranks up to num_premises
-            sorted_indices = torch.argsort(sim_scores, dim=-1, descending=True) # [batch_size, num_premises]
+            # GPU scores for MRR
+            sim_scores = torch.matmul(state_embs, P_matrix.t()) 
             
-            batch_size = len(target_pids_list)
-            for i in range(batch_size):
-                targets = set(target_pids_list[i])
-                if len(targets) == 0:
-                    continue
-                    
+            for i in range(len(target_pids_list)):
+                targets = target_pids_list[i]
+                target_indices = [pid_to_idx[p] for p in targets if p in pid_to_idx]
+                if not target_indices: continue
                 total_states += 1
                 
-                # Check top 1
-                top1_pid = all_pids[sorted_indices[i, 0].item()]
-                if top1_pid in targets:
-                    recall_at_1 += 1
-                    
-                # Check top K
-                topk_pids = [all_pids[idx.item()] for idx in sorted_indices[i, :args.k]]
-                if any(pid in targets for pid in topk_pids):
-                    recall_at_k += 1
-                    
-                # Calculate MRR
-                for rank, idx in enumerate(sorted_indices[i]):
-                    pid = all_pids[idx.item()]
-                    if pid in targets:
-                        mrr += 1.0 / (rank + 1)
-                        break
+                # Metrics via FAISS
+                top_k_indices = I[i]
+                target_set = set(target_indices)
+                if top_k_indices[0] in target_set: recall_at_1 += 1
+                if any(idx in target_set for idx in top_k_indices): recall_at_k += 1
+                
+                # MRR via GPU count
+                target_score = sim_scores[i, target_indices].max()
+                rank = (sim_scores[i] > target_score).sum().item() + 1
+                mrr += 1.0 / rank
                         
     print("\n" + "="*40)
     print("EVALUATION RESULTS")
