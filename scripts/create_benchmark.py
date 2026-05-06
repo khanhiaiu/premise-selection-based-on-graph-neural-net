@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     args = parser.parse_args()
 
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_bench)), exist_ok=True)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Load data
