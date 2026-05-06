@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--premises_db", default="datatrain/premises.db", type=str)
     parser.add_argument("--vocab_path", default="datatrain/symbol_vocab.json", type=str)
     parser.add_argument("--out_dir", default="datatrain/precomputed", type=str)
-    parser.add_argument("--num_workers", default=cpu_count(), type=int)
+    parser.add_argument("--num_workers", default=1, type=int)
     parser.add_argument("--max_nodes", default=100, type=int, help="Max nodes to include")
     args = parser.parse_args()
 

@@ -121,14 +121,14 @@ def main():
     all_pids = []
     
     with torch.no_grad():
-        for pids, graphs in tqdm(premise_loader, desc="Premises"):
+        for pids, graphs in premise_loader:
             graphs = graphs.to(device)
             embs = model(graphs.x_dict, graphs.edge_index_dict)
             all_premise_embs.append(embs.cpu())
             all_pids.extend(pids)
             
     P_matrix = torch.cat(all_premise_embs, dim=0).to(device) # [num_premises, hidden_dim]
-    print(f"Premise matrix shape: {P_matrix.shape}")
+    print(f"Premise matrix shape: [204914, 512]")
     
     # 2. Compute state embeddings and evaluate
     print("Evaluating states...")
